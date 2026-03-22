@@ -177,10 +177,13 @@ with tabs[0]:
             csv = csv_df.to_csv(index=False).encode('utf-8')
             st.download_button("Download CSV", data=csv, file_name="batch_leaf_summary.csv", mime="text/csv")
 
-            # Fixed Reset button
+            # -----------------------------
+            # SAFE Reset Button
+            # -----------------------------
             if st.button("Reset Analysis"):
+                # Reset safely without AttributeError
                 st.session_state['start_analysis'] = False
-                if 'history' in st.session_state:
+                if st.session_state.get('history') is not None:
                     st.session_state['history'] = []
                 st.experimental_rerun()
 
