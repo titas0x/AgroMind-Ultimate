@@ -1,150 +1,197 @@
 import streamlit as st
-import google.generativeai as genai
 from PIL import Image
-import pandas as pd
 import numpy as np
-import time
-import re
-import random
+import cv2
+import pandas as pd
+from datetime import datetime
+import os
+import google.generativeai as genai
 
-# --- 1. STABLE REST CONNECTION ---
-if "GEMINI_API_KEY" in st.secrets:
-    # 'rest' transport is the fix for 404/Connection errors
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"], transport='rest')
-    model = genai.GenerativeModel('gemini-1.5-flash')
-else:
-    model = None
+# ------------------ CONFIG ------------------
+st.set_page_config(page_title="AgroMind AI", layout="wide")
 
-# --- 2. PAGE CONFIG ---
-st.set_page_config(page_title="AgroMind Pro", layout="wide", page_icon="🌱")
+# ------------------ GEMINI SETUP ------------------
+genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+model = genai.GenerativeModel("gemini-1.5-flash")
 
-# --- 3. SESSION STATE ---
-if 'logged_in' not in st.session_state: st.session_state.logged_in = False
-if 'history' not in st.session_state: st.session_state.history = []
-if 'treatment_logs' not in st.session_state: st.session_state.treatment_logs = []
+# ------------------ LOGIN ------------------
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
 
-# --- 4. OPEN LOGIN SYSTEM ---
-if not st.session_state.logged_in:
-    st.title("🌱 AgroMind: Smart Agriculture System")
-    u, p = st.text_input("Username"), st.text_input("Password", type="password")
-    if st.button("Access Dashboard", use_container_width=True):
-        if u and p: 
+def login():
+    st.title("🔐 AgroMind Login")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+
+    if st.button("Login"):
+        if username and password:
             st.session_state.logged_in = True
-            st.rerun()
+            st.success("Logged in successfully!")
+
+if not st.session_state.logged_in:
+    login()
+    st.stop()
+
+# ------------------ FUNCTIONS ------------------
+
+def analyze_leaf(image):
+    img = np.array(image)
+    img = cv2.resize(img, (224, 224))
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+
+    lower_green = np.array([25, 40, 40])
+    upper_green = np.array([90, 255, 255])
+    green_mask = cv2.inRange(hsv, lower_green, upper_green)
+
+    green_ratio = np.sum(green_mask > 0) / green_mask.size
+    damage = (1 - green_ratio) * 100
+    health = green_ratio * 100
+
+    lower_brown = np.array([10, 100, 20])
+    upper_brown = np.array([20, 255, 200])
+    brown_mask = cv2.inRange(hsv, lower_brown, upper_brown)
+    brown_ratio = np.sum(brown_mask > 0) / brown_mask.size
+
+    return round(damage,2), round(health,2), round(brown_ratio*100,2)
+
+def estimate_water(damage):
+    if damage < 10:
+        return 0.2
+    elif damage < 30:
+        return 0.5
+    elif damage < 60:
+        return 1.0
+    else:
+        return 1.5
+
+def estimate_npk(damage, brown_ratio):
+    if damage < 15:
+        return "10-10-10"
+    elif brown_ratio > 20:
+        return "10-5-20"
+    elif damage > 50:
+        return "20-10-10"
+    else:
+        return "15-15-15"
+
+def water_stress(damage, brown_ratio):
+    if brown_ratio > 25:
+        return "High"
+    elif damage > 40:
+        return "Moderate"
+    else:
+        return "Low"
+
+def soil_insights(damage):
+    if damage < 20:
+        return "Good", "Healthy"
+    elif damage < 50:
+        return "Medium", "Moderate"
+    else:
+        return "Low", "Poor"
+
+def generate_treatment(damage):
+    if damage < 10:
+        return "No treatment needed. Maintain watering."
+    elif damage < 40:
+        return "Increase watering slightly and use balanced fertilizer."
+    else:
+        return "Immediate watering required. Add nitrogen-rich fertilizer and remove damaged leaves."
+
+def save_history(data):
+    df = pd.DataFrame([data])
+    if os.path.exists("history.csv"):
+        old = pd.read_csv("history.csv")
+        df = pd.concat([old, df])
+    df.to_csv("history.csv", index=False)
+
+# ------------------ UI ------------------
+
+st.title("🌱 AgroMind AI Dashboard")
+
+uploaded_file = st.file_uploader("Upload Leaf Image", type=["jpg", "png", "jpeg"])
+
+if uploaded_file:
+    image = Image.open(uploaded_file)
+    st.image(image, caption="Uploaded Leaf", use_column_width=True)
+
+    damage, health, brown = analyze_leaf(image)
+    water = estimate_water(damage)
+    npk = estimate_npk(damage, brown)
+    stress = water_stress(damage, brown)
+    moisture, fertility = soil_insights(damage)
+    treatment = generate_treatment(damage)
+
+    st.subheader("📊 Analysis Result")
+    col1, col2, col3 = st.columns(3)
+
+    col1.metric("Damage %", f"{damage}%")
+    col2.metric("Health %", f"{health}%")
+    col3.metric("Water Needed (L/day)", f"{water} L")
+
+    st.subheader("🌿 Insights")
+    st.write(f"**Water Stress:** {stress}")
+    st.write(f"**Soil Moisture:** {moisture}")
+    st.write(f"**Soil Fertility:** {fertility}")
+    st.write(f"**Recommended NPK:** {npk}")
+
+    st.subheader("🧾 Treatment")
+    st.write(treatment)
+
+    # Gemini Explanation
+    prompt = f"""
+    A plant has:
+    Damage: {damage}%
+    Health: {health}%
+    Water needed: {water} L/day
+    NPK: {npk}
+
+    Explain in simple terms what farmer should do.
+    """
+
+    response = model.generate_content(prompt)
+
+    st.subheader("🤖 AI Advice")
+    st.write(response.text)
+
+    # Save History
+    if st.button("Save to History"):
+        save_history({
+            "time": datetime.now(),
+            "damage": damage,
+            "health": health,
+            "water": water
+        })
+        st.success("Saved!")
+
+# ------------------ HISTORY ------------------
+
+st.subheader("📈 Progress Graph")
+
+if os.path.exists("history.csv"):
+    df = pd.read_csv("history.csv")
+    st.line_chart(df[["damage", "health"]])
+
+    with open("history.csv", "rb") as f:
+        st.download_button("📥 Download Data", f, file_name="plant_history.csv")
 else:
-    # --- SIDEBAR ---
-    with st.sidebar:
-        st.header("👤 Dashboard Control")
-        if st.button("Logout", use_container_width=True):
-            st.session_state.logged_in = False
-            st.rerun()
-        st.divider()
-        if st.session_state.history:
-            df_csv = pd.DataFrame(st.session_state.history).drop(columns=['SavedImage'])
-            st.download_button("📥 Download Records (CSV)", df_csv.to_csv(index=False), "agromind_data.csv")
-        if st.button("🗑️ Reset Database", type="primary"):
-            st.session_state.history, st.session_state.treatment_logs = [], []
-            st.rerun()
+    st.write("No history yet.")
 
-    st.title("🌿 AgroMind Command Center")
-    tabs = st.tabs(["🔍 AI Diagnosis", "📊 Sensors & NPK", "📝 Treatment Tracker", "📈 Recovery Graph", "📜 History"])
+# ------------------ TRACKER ------------------
 
-    # --- TAB 1: ACCURATE DYNAMIC DIAGNOSIS ---
-    with tabs[0]:
-        mode = st.radio("Input Source:", ["Camera", "Gallery"], horizontal=True)
-        file = st.camera_input("Scan Leaf") if mode == "Camera" else st.file_uploader("Upload Image", type=["jpg","png"])
-        
-        if file:
-            img = Image.open(file)
-            st.image(img, use_container_width=True)
-            if st.button("🚀 Run Precise Pixel Analysis", use_container_width=True):
-                with st.spinner("Calculating RGB shifts and Edge densities..."):
-                    # CACHE BUSTER: Forces a unique calculation per request
-                    request_id = random.randint(1000, 9999)
-                    
-                    # PROMPT: Explicitly instructs to detect Healthy vs Damaged
-                    prompt = f"""
-                    SYSTEM INSTRUCTION [ID:{request_id}]:
-                    Analyze this specific image independently. Do not repeat previous results.
-                    
-                    TASK:
-                    1. Check for HEALTHY features: Uniform green (G channel intensity), smooth edges, no spots.
-                    2. Check for DAMAGE: Chlorosis (Yellowing), Necrosis (Brown/Black patches), Holes (Insects), or Wilting.
-                    3. If the leaf is healthy, return 'Damage: 0%' and 'Health: 100%'.
-                    4. If damaged, calculate the area affected and return an exact percentage.
-                    5. Provide 3 specific treatments based on the findings.
-                    """
-                    
-                    try:
-                        res = model.generate_content([prompt, img])
-                        analysis = res.text
-                        # Extract first number found for damage %
-                        nums = re.findall(r'\d+', analysis)
-                        dmg_val = int(nums[0]) if (nums and int(nums[0]) <= 100) else 0
-                    except:
-                        analysis = "⚠️ Connection Reset. Defaulting to safe local scan: 0% Damage detected (Healthy Leaf)."
-                        dmg_val = 0
+st.subheader("🧑‍🌾 Treatment Tracker")
 
-                    st.success(f"### Analysis Result\n{analysis}")
-                    
-                    # RECORD TO HISTORY
-                    st.session_state.history.append({
-                        "Time": time.strftime("%H:%M:%S"),
-                        "Diagnosis": analysis[:250],
-                        "Damage": float(dmg_val),
-                        "Health": float(100 - dmg_val),
-                        "SavedImage": img
-                    })
+water_input = st.text_input("Water Given (liters)")
+fert_input = st.text_input("Fertilizer Used")
 
-    # --- TAB 2: NPK & AUTO-RECOMMENDATIONS ---
-    with tabs[1]:
-        st.subheader("🧪 Nutrient Monitoring")
-        n, p, k = st.columns(3)
-        vn = n.number_input("Nitrogen (N)", 0, 100, 20)
-        vp = p.number_input("Phosphorus (P)", 0, 100, 15)
-        vk = k.number_input("Potassium (K)", 0, 100, 30)
-        
-        # Fixed Indexing for the NPK Chart
-        npk_df = pd.DataFrame({"Nutrient": ["N", "P", "K"], "Level": [vn, vp, vk]}).set_index("Nutrient")
-        st.bar_chart(npk_df, color="#2E7D32")
-
-        st.divider()
-        st.subheader("💡 Intelligent Recommendations")
-        rec1, rec2 = st.columns(2)
-        with rec1:
-            if vn < 25: st.error("Low Nitrogen: Apply Urea or organic compost.")
-            elif vp < 20: st.warning("Low Phosphorus: Apply Bone Meal or DAP.")
-            else: st.success("Primary Nutrients Balanced.")
-        with rec2:
-            if vk < 25: st.error("Low Potassium: Apply Wood Ash or MOP.")
-            m = st.slider("Soil Moisture %", 0, 100, 40)
-            if m < 35: st.error("🚨 Water Stress: High. Irrigate immediately.")
-
-    # --- TAB 3: TREATMENT TRACKER ---
-    with tabs[2]:
-        act = st.selectbox("Action:", ["Watering", "Fertilizing", "Pesticide", "Pruning"])
-        val = st.text_input("Details (e.g. 250ml / 10g)")
-        if st.button("Log Action"):
-            st.session_state.treatment_logs.append({"Time": time.strftime("%H:%M"), "Task": act, "Details": val})
-        if st.session_state.treatment_logs:
-            st.table(pd.DataFrame(st.session_state.treatment_logs))
-
-    # --- TAB 4: RECOVERY GRAPH (FIXED INDEX) ---
-    with tabs[3]:
-        st.subheader("📈 Plant Recovery Trend")
-        if st.session_state.history:
-            # Using 'Time' as the index for the line chart
-            df_recovery = pd.DataFrame(st.session_state.history)
-            st.line_chart(df_recovery.set_index("Time")["Health"])
-            st.caption("Tracking how Health % increases with every scan.")
-        else:
-            st.info("No data points. Run an AI scan to see the trend.")
-
-    # --- TAB 5: HISTORY RECORDS ---
-    with tabs[4]:
-        for item in reversed(st.session_state.history):
-            with st.container(border=True):
-                c1, c2 = st.columns([1, 4])
-                c1.image(item['SavedImage'], use_container_width=True)
-                c2.write(f"**Scan at {item['Time']}** | Health: {item['Health']}%")
-                c2.caption(item['Diagnosis'])
+if st.button("Save Treatment Log"):
+    log = pd.DataFrame([{
+        "time": datetime.now(),
+        "water": water_input,
+        "fertilizer": fert_input
+    }])
+    if os.path.exists("treatment.csv"):
+        old = pd.read_csv("treatment.csv")
+        log = pd.concat([old, log])
+    log.to_csv("treatment.csv", index=False)
+    st.success("Treatment Logged!")
