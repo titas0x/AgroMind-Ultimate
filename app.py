@@ -5,6 +5,16 @@ import numpy as np
 import datetime
 
 # -----------------------------
+# Initialize session state safely
+# -----------------------------
+if 'start_analysis' not in st.session_state:
+    st.session_state['start_analysis'] = False
+if 'history' not in st.session_state:
+    st.session_state['history'] = []
+if 'leaf_results' not in st.session_state:
+    st.session_state['leaf_results'] = []
+
+# -----------------------------
 # Leaf Health & Pest Analysis
 # -----------------------------
 def calculate_health_and_pests(image, dryness_level, texture_score=50):
@@ -64,11 +74,6 @@ tabs = st.tabs(["Leaf Analysis", "Farming Knowledge"])
 # -----------------------------
 with tabs[0]:
     st.title("🌱 AgroMind: Leaf Health & Pest Analysis System")
-
-    if 'start_analysis' not in st.session_state:
-        st.session_state['start_analysis'] = False
-    if 'history' not in st.session_state:
-        st.session_state['history'] = []
 
     st.markdown("""
     ### Instructions
@@ -181,10 +186,9 @@ with tabs[0]:
             # SAFE Reset Button
             # -----------------------------
             if st.button("Reset Analysis"):
-                # Reset safely without AttributeError
                 st.session_state['start_analysis'] = False
-                if st.session_state.get('history') is not None:
-                    st.session_state['history'] = []
+                st.session_state['history'] = []
+                st.session_state['leaf_results'] = []
                 st.experimental_rerun()
 
 # -----------------------------
