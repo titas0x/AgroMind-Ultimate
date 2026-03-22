@@ -1,5 +1,5 @@
 streamlit
-tensorflow-cpu
+google-generativeai
 Pillow
-numpy
 pandas
+numpy
