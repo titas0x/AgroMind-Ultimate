@@ -4,8 +4,15 @@ import numpy as np
 import pandas as pd
 import datetime
 import cv2
+import joblib
 
 st.set_page_config(page_title="AgroMind", layout="wide")
+
+# ----------------- LOAD MODEL -----------------
+try:
+    model = joblib.load("leaf_model.pkl")
+except:
+    model = None
 
 # ----------------- SESSION STATE -----------------
 if "history" not in st.session_state:
@@ -13,7 +20,7 @@ if "history" not in st.session_state:
 if "water_logs" not in st.session_state:
     st.session_state.water_logs = []
 
-# ----------------- PREPROCESS IMAGE -----------------
+# ----------------- PREPROCESS -----------------
 def preprocess(img):
     img = img.resize((256,256))
     img_array = np.array(img)
@@ -22,25 +29,48 @@ def preprocess(img):
     gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
     return img_array, hsv, gray
 
-# ----------------- ANALYZE SINGLE LEAF -----------------
+# ----------------- ANALYZE -----------------
 def analyze_leaf(img, dryness):
     img_array, hsv, gray = preprocess(img)
+
+    # AI Prediction
+    if model:
+        try:
+            img_resized = cv2.resize(img_array, (64,64))
+            img_flat = img_resized.flatten().reshape(1, -1)
+            prediction = model.predict(img_flat)[0]
+        except:
+            prediction = "Unknown"
+    else:
+        prediction = "Model not loaded"
+
+    # Color masks
     green = cv2.inRange(hsv, (30,40,40), (90,255,255))
     yellow = cv2.inRange(hsv, (15,50,50), (35,255,255))
     brown = cv2.inRange(hsv, (5,50,50), (20,255,200))
-    blur_gray = cv2.GaussianBlur(gray,(5,5),0)
-    _, black = cv2.threshold(blur_gray,0,255,cv2.THRESH_BINARY_INV+cv2.THRESH_OTSU)
-    
+
+    # Better pest detection
+    edges = cv2.Canny(gray, 50, 150)
+    pest_mask = edges
+
     total = 256*256
     green_ratio = np.sum(green>0)/total
     yellow_ratio = np.sum(yellow>0)/total
     brown_ratio = np.sum(brown>0)/total
-    pest_ratio = np.sum(black>0)/total
-    
+    pest_ratio = np.sum(pest_mask>0)/total
+
     health = green_ratio*100 - brown_ratio*150 - pest_ratio*120 - yellow_ratio*80 - dryness*0.15
     health = max(5,min(100,health))
     damage = 100-health
-    
+
+    # AI correction
+    if prediction == "healthy":
+        health = max(85, health)
+        pest_ratio = min(0.02, pest_ratio)
+        brown_ratio = min(0.02, brown_ratio)
+        yellow_ratio = min(0.05, yellow_ratio)
+        damage = 100-health
+
     return {
         "health": health,
         "damage": damage,
@@ -48,43 +78,70 @@ def analyze_leaf(img, dryness):
         "green_mask": green,
         "yellow_mask": yellow,
         "brown_mask": brown,
-        "pest_mask": black,
+        "pest_mask": pest_mask,
         "yellow_ratio": yellow_ratio,
-        "brown_ratio": brown_ratio
+        "brown_ratio": brown_ratio,
+        "ai_prediction": prediction
     }
 
-# ----------------- DISEASE DETECTION WITH SEVERITY -----------------
+# ----------------- MULTI-DISEASE DETECTION -----------------
 def detect_disease(res, dryness):
-    issues = []
-    
-    # Assign severity score for sorting
-    if res["brown_ratio"]>0.2 and res["pest_ratio"]>0.05:
-        issues.append((3,"Severe Fungal + Pest Attack","Apply fungicide + pesticide",["Mancozeb","Imidacloprid"]))
-    else:
-        if res["brown_ratio"]>0.15:
-            issues.append((2,"Fungal Infection","Apply antifungal spray",["Carbendazim","Copper Oxychloride"]))
-        if res["pest_ratio"]>0.05:
-            issues.append((2,"Pest Attack","Use neem oil or insecticide",["Neem Oil","Spinosad"]))
-    
-    if res["yellow_ratio"]>0.25:
-        issues.append((1,"Nutrient Deficiency","Add fertilizers",["NPK","Vermicompost"]))
-    
-    if dryness>60:
-        issues.append((1,"Water Stress","Increase watering",["Irrigation","Mulching"]))
-    
-    if not issues:
-        issues.append((0,"Healthy Leaf","No action needed",["None"]))
-    
-    # Sort by severity descending
-    issues_sorted = sorted(issues, key=lambda x: x[0], reverse=True)
-    
-    diseases = [i[1] for i in issues_sorted]
-    solutions = [i[2] for i in issues_sorted]
-    meds = [i[3] for i in issues_sorted]
-    
+
+    diseases = []
+    solutions = []
+    meds = []
+
+    pred = res.get("ai_prediction")
+
+    # Primary (AI)
+    if pred == "fungal":
+        diseases.append("Fungal Infection")
+        solutions.append("Apply antifungal spray")
+        meds.append(["Carbendazim","Mancozeb"])
+
+    elif pred == "pest":
+        diseases.append("Pest Attack")
+        solutions.append("Use insecticide or neem oil")
+        meds.append(["Neem Oil","Imidacloprid"])
+
+    elif pred == "nutrient":
+        diseases.append("Nutrient Deficiency")
+        solutions.append("Add fertilizers")
+        meds.append(["NPK","Vermicompost"])
+
+    # Secondary (extra issues)
+    if res["brown_ratio"] > 0.15:
+        if "Fungal Infection" not in diseases:
+            diseases.append("Fungal Infection")
+            solutions.append("Apply antifungal spray")
+            meds.append(["Carbendazim"])
+
+    if res["pest_ratio"] > 0.05:
+        if "Pest Attack" not in diseases:
+            diseases.append("Pest Attack")
+            solutions.append("Use neem oil")
+            meds.append(["Neem Oil"])
+
+    if res["yellow_ratio"] > 0.25:
+        if "Nutrient Deficiency" not in diseases:
+            diseases.append("Nutrient Deficiency")
+            solutions.append("Add fertilizers")
+            meds.append(["NPK"])
+
+    if dryness > 60:
+        diseases.append("Water Stress")
+        solutions.append("Increase watering")
+        meds.append(["Irrigation"])
+
+    # Healthy case
+    if not diseases:
+        diseases = ["Healthy Leaf"]
+        solutions = ["No action needed"]
+        meds = [["None"]]
+
     return diseases, solutions, meds
 
-# ----------------- MULTI-LEAF ANALYSIS -----------------
+# ----------------- MULTI VIEW -----------------
 def multi_view(images, dryness):
     results=[]
     combined_y = combined_b = combined_p = None
@@ -107,7 +164,7 @@ def multi_view(images, dryness):
             combined_p |= res["pest_mask"]
     return results, np.mean(H), np.mean(D), np.mean(P), combined_y, combined_b, combined_p, np.mean(YR), np.mean(BR)
 
-# ----------------- SOIL ANALYSIS -----------------
+# ----------------- SOIL -----------------
 def soil_analysis(h,dryness):
     moisture = max(10,70 - dryness/2 - (100-h)/2)
     water_stress = "High" if moisture<25 else "Moderate" if moisture<50 else "Low"
@@ -144,7 +201,7 @@ def farming_instructions():
         "🌞 Ensure adequate sunlight and spacing.",
         "🧹 Remove severely damaged leaves to prevent disease spread.",
         "💧 Mulching retains soil moisture in dry conditions.",
-        "🩺 Apply fungicide or pesticide based on leaf condition; follow dosage instructions."
+        "🩺 Apply treatment based on condition carefully."
     ]
 
 # ----------------- UI -----------------
@@ -152,7 +209,6 @@ st.title("🌱 AgroMind System")
 menu = st.sidebar.radio("Menu",["Analysis","Batch Summary","Water Tracker","Guide","Instructions"])
 dryness = st.sidebar.slider("Default Dryness Level",0,100,10)
 
-# Reset All Button
 if st.sidebar.button("Reset All"):
     st.session_state.history=[]
     st.session_state.water_logs=[]
@@ -162,6 +218,7 @@ if st.sidebar.button("Reset All"):
 if menu=="Analysis":
     mode = st.radio("Input Mode",["Camera","Upload"])
     leaf_images=[]
+
     if mode=="Camera":
         cam = st.camera_input("Capture Leaf")
         if cam:
@@ -174,50 +231,49 @@ if menu=="Analysis":
     if leaf_images:
         results, h,d,p,y,b,pe,yr,br = multi_view(leaf_images,dryness)
         st.subheader("🌿 Individual Leaf Analysis")
-        leaf_diseases, leaf_solutions, leaf_meds = [], [], []
+
         for idx,res in enumerate(results):
             diseases, solutions, meds = detect_disease(res, dryness)
-            leaf_diseases.append(diseases)
-            leaf_solutions.append(solutions)
-            leaf_meds.append(meds)
+
             st.write(f"**Leaf {idx+1}:**")
             st.write(f"Health: {round(res['health'],2)}%, Damage: {round(res['damage'],2)}%, Pest Ratio: {round(res['pest_ratio']*100,2)}%")
-            st.image(leaf_images[idx], caption=f"Leaf {idx+1} Image")
-            st.image(heatmap(leaf_images[idx],res["yellow_mask"],res["brown_mask"],res["pest_mask"]), caption=f"Leaf {idx+1} Heatmap")
+
+            st.info(f"🌿 AI Diagnosis: {res['ai_prediction']}")
+
+            st.image(leaf_images[idx])
+            st.image(heatmap(leaf_images[idx],res["yellow_mask"],res["brown_mask"],res["pest_mask"]))
+
             for i, disease in enumerate(diseases):
                 st.warning(disease)
                 st.write("Treatment Priority:", solutions[i])
-                st.write("Medicines:", ", ".join(meds[i]))
+                st.write("Medicine Recommendations:", ", ".join(meds[i]))
+
             st.markdown("---")
-        
-        # Soil analysis
+
         moisture,water_stress,fert,N,P,K = soil_analysis(h,dryness)
         st.subheader("🌱 Soil Analysis (Average for Batch)")
         st.write(f"Moisture: {round(moisture,2)}%")
         st.write(f"Water Stress: {water_stress}")
         st.write(f"Fertility: {fert}")
+
         st.subheader("📊 NPK Levels")
         st.bar_chart(pd.DataFrame({"N":[N],"P":[P],"K":[K]}))
-        
+
         if st.button("Save to History"):
             st.session_state.history.append({
                 "date":datetime.datetime.now(),
-                "health":h,"damage":d,"pest":p,
-                "disease":leaf_diseases,
-                "solution":leaf_solutions,
-                "medicines":leaf_meds
+                "health":h,"damage":d,"pest":p
             })
+
         if st.session_state.history:
             df=pd.DataFrame(st.session_state.history)
             st.subheader("Trend Graphs (Average Health & Damage)")
             st.line_chart(df[["health","damage"]])
             st.download_button("Download CSV",df.to_csv(index=False),"agromind_data.csv")
 
-# ----------------- BATCH SUMMARY -----------------
 elif menu=="Batch Summary":
     st.dataframe(pd.DataFrame(st.session_state.history))
 
-# ----------------- WATER TRACKER -----------------
 elif menu=="Water Tracker":
     water = st.number_input("Water Given (ml)")
     treatment = st.text_input("Treatment Applied")
@@ -229,7 +285,6 @@ elif menu=="Water Tracker":
     st.subheader("Water Logs")
     st.write(st.session_state.water_logs)
 
-# ----------------- GUIDE -----------------
 elif menu=="Guide":
     st.subheader("🌾 Crop Guide")
     for c in crops_general:
@@ -239,7 +294,6 @@ elif menu=="Guide":
     if q:
         st.success(answer_query(q))
 
-# ----------------- INSTRUCTIONS -----------------
 elif menu=="Instructions":
     st.subheader("📖 Farming Instructions & Tips")
     for tip in farming_instructions():
