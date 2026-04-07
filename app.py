@@ -43,10 +43,24 @@ ph = None
 moisture_sensor = None
 pump_status = "OFF"
 
+# ----------------- DHT22 ADDED (NEW) -----------------
+temperature = None
+humidity_air = None
+
 if sensor_data:
     ph = sensor_data.get("ph")
-    moisture_sensor = sensor_data.get("moisture")
-    pump_status = sensor_data.get("water_pump", "OFF")
+    moisture_sensor = sensor_data.get("soil_moisture")
+
+    pump = sensor_data.get("pump", 0)
+
+    if pump == 1:
+        pump_status = "ON"
+    else:
+        pump_status = "OFF"
+
+    # ----------------- DHT22 DATA (NEW ADDITION) -----------------
+    temperature = sensor_data.get("temperature")
+    humidity_air = sensor_data.get("humidity")
 
 # ----------------- PH BASED FERTILITY -----------------
 def get_fertility_from_ph(ph):
@@ -248,6 +262,9 @@ if sensor_data:
     col1.metric("🌡️ Soil pH", ph if ph is not None else "N/A")
     col2.metric("💧 Soil Moisture (%)", moisture_sensor if moisture_sensor is not None else "N/A")
     col3.metric("🚿 Water Pump", pump_status)
+
+    # ----------------- DHT22 UI (NEW ADDITION) -----------------
+    st.metric("🌡️ Temperature (°C)", temperature if temperature is not None else "N/A")
 
     fertility = get_fertility_from_ph(ph)
     water_stress = get_water_stress(moisture_sensor)
