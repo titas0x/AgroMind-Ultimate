@@ -5,6 +5,7 @@ import pandas as pd
 import datetime
 import cv2
 import joblib
+import requests
 
 st.set_page_config(page_title="AgroMind", layout="wide")
 
@@ -20,6 +21,55 @@ if "history" not in st.session_state:
 if "water_logs" not in st.session_state:
     st.session_state.water_logs = []
 
+# ----------------- BACKEND -----------------
+API_URL = "https://agromind-server.onrender.com/data"
+
+def get_sensor_data():
+    try:
+        res = requests.get(API_URL, timeout=5)
+        if res.status_code == 200:
+            data = res.json()
+            if isinstance(data, list) and len(data) > 0:
+                return data[-1]
+            elif isinstance(data, dict) and len(data) > 0:
+                return data
+        return None
+    except:
+        return None
+
+sensor_data = get_sensor_data()
+
+ph = None
+moisture_sensor = None
+pump_status = "OFF"
+
+if sensor_data:
+    ph = sensor_data.get("ph")
+    moisture_sensor = sensor_data.get("moisture")
+    pump_status = sensor_data.get("water_pump", "OFF")
+
+# ----------------- PH BASED FERTILITY -----------------
+def get_fertility_from_ph(ph):
+    if ph is None:
+        return None
+    if ph < 5.5:
+        return "Low"
+    elif ph <= 7.5:
+        return "Moderate"
+    else:
+        return "High"
+
+# ----------------- WATER STRESS -----------------
+def get_water_stress(m):
+    if m is None:
+        return None
+    if m < 25:
+        return "High"
+    elif m < 50:
+        return "Moderate"
+    else:
+        return "Low"
+
 # ----------------- PREPROCESS -----------------
 def preprocess(img):
     img = img.resize((256,256))
@@ -33,7 +83,6 @@ def preprocess(img):
 def analyze_leaf(img, dryness):
     img_array, hsv, gray = preprocess(img)
 
-    # AI Prediction
     if model:
         try:
             img_resized = cv2.resize(img_array, (64,64))
@@ -44,12 +93,10 @@ def analyze_leaf(img, dryness):
     else:
         prediction = "Model not loaded"
 
-    # Color masks
     green = cv2.inRange(hsv, (30,40,40), (90,255,255))
     yellow = cv2.inRange(hsv, (15,50,50), (35,255,255))
     brown = cv2.inRange(hsv, (5,50,50), (20,255,200))
 
-    # Better pest detection
     edges = cv2.Canny(gray, 50, 150)
     pest_mask = edges
 
@@ -63,12 +110,8 @@ def analyze_leaf(img, dryness):
     health = max(5,min(100,health))
     damage = 100-health
 
-    # AI correction
     if prediction == "healthy":
         health = max(85, health)
-        pest_ratio = min(0.02, pest_ratio)
-        brown_ratio = min(0.02, brown_ratio)
-        yellow_ratio = min(0.05, yellow_ratio)
         damage = 100-health
 
     return {
@@ -93,7 +136,6 @@ def detect_disease(res, dryness):
 
     pred = res.get("ai_prediction")
 
-    # Primary (AI)
     if pred == "fungal":
         diseases.append("Fungal Infection")
         solutions.append("Apply antifungal spray")
@@ -109,7 +151,6 @@ def detect_disease(res, dryness):
         solutions.append("Add fertilizers")
         meds.append(["NPK","Vermicompost"])
 
-    # Secondary (extra issues)
     if res["brown_ratio"] > 0.15:
         if "Fungal Infection" not in diseases:
             diseases.append("Fungal Infection")
@@ -133,7 +174,6 @@ def detect_disease(res, dryness):
         solutions.append("Increase watering")
         meds.append(["Irrigation"])
 
-    # Healthy case
     if not diseases:
         diseases = ["Healthy Leaf"]
         solutions = ["No action needed"]
@@ -164,16 +204,6 @@ def multi_view(images, dryness):
             combined_p |= res["pest_mask"]
     return results, np.mean(H), np.mean(D), np.mean(P), combined_y, combined_b, combined_p, np.mean(YR), np.mean(BR)
 
-# ----------------- SOIL -----------------
-def soil_analysis(h,dryness):
-    moisture = max(10,70 - dryness/2 - (100-h)/2)
-    water_stress = "High" if moisture<25 else "Moderate" if moisture<50 else "Low"
-    fertility = "High" if h>75 else "Moderate" if h>50 else "Low"
-    N = max(10,100-h)
-    P = max(5,80-h)
-    K = max(5,60-h)
-    return moisture, water_stress, fertility, N, P, K
-
 # ----------------- HEATMAP -----------------
 def heatmap(img,y,b,p):
     base = img.resize((256,256)).convert("RGBA")
@@ -185,6 +215,7 @@ def heatmap(img,y,b,p):
 
 # ----------------- GUIDE -----------------
 crops_general = ["Rice","Wheat","Maize","Potato","Tomato","Onion","Sugarcane","Carrot","Spinach","Soybean"]
+
 def answer_query(q):
     q=q.lower()
     if "water" in q: return "Water early morning or evening"
@@ -206,6 +237,30 @@ def farming_instructions():
 
 # ----------------- UI -----------------
 st.title("🌱 AgroMind System")
+
+# -------- SENSOR DASHBOARD --------
+st.subheader("📡 Live Sensor Data")
+
+if sensor_data:
+
+    col1, col2, col3 = st.columns(3)
+
+    col1.metric("🌡️ Soil pH", ph if ph is not None else "N/A")
+    col2.metric("💧 Soil Moisture (%)", moisture_sensor if moisture_sensor is not None else "N/A")
+    col3.metric("🚿 Water Pump", pump_status)
+
+    fertility = get_fertility_from_ph(ph)
+    water_stress = get_water_stress(moisture_sensor)
+
+    st.subheader("🌱 Soil Analysis (Sensor-Based)")
+    st.write(f"Moisture: {moisture_sensor}%")
+    st.write(f"Water Stress: {water_stress}")
+    st.write(f"Fertility (from pH): {fertility}")
+
+else:
+    st.error("❌ No data received")
+
+# -------- MENU --------
 menu = st.sidebar.radio("Menu",["Analysis","Batch Summary","Water Tracker","Guide","Instructions"])
 dryness = st.sidebar.slider("Default Dryness Level",0,100,10)
 
@@ -214,7 +269,7 @@ if st.sidebar.button("Reset All"):
     st.session_state.water_logs=[]
     st.success("All history and water logs cleared!")
 
-# ----------------- ANALYSIS -----------------
+# -------- ANALYSIS --------
 if menu=="Analysis":
     mode = st.radio("Input Mode",["Camera","Upload"])
     leaf_images=[]
@@ -250,14 +305,8 @@ if menu=="Analysis":
 
             st.markdown("---")
 
-        moisture,water_stress,fert,N,P,K = soil_analysis(h,dryness)
-        st.subheader("🌱 Soil Analysis (Average for Batch)")
-        st.write(f"Moisture: {round(moisture,2)}%")
-        st.write(f"Water Stress: {water_stress}")
-        st.write(f"Fertility: {fert}")
-
         st.subheader("📊 NPK Levels")
-        st.bar_chart(pd.DataFrame({"N":[N],"P":[P],"K":[K]}))
+        st.bar_chart(pd.DataFrame({"N":[50],"P":[40],"K":[30]}))
 
         if st.button("Save to History"):
             st.session_state.history.append({
@@ -267,7 +316,7 @@ if menu=="Analysis":
 
         if st.session_state.history:
             df=pd.DataFrame(st.session_state.history)
-            st.subheader("Trend Graphs (Average Health & Damage)")
+            st.subheader("Trend Graphs")
             st.line_chart(df[["health","damage"]])
             st.download_button("Download CSV",df.to_csv(index=False),"agromind_data.csv")
 
